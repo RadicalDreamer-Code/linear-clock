@@ -2,6 +2,8 @@ import sys
 import datetime
 from PySide6 import QtCore, QtGui, QtWidgets
 
+from screen_dialog import SettingsDialog
+
 class AnimatedToggleClockBar(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
@@ -11,13 +13,13 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         # self.screen_x = screen.x()
         # self.screen_y = screen.y()
 
-        screen_index = 1  # 0 - primary, 1 - secondary, etc.
+        self.screen_index = 1  # 0 - primary, 1 - secondary, etc.
         screens = QtGui.QGuiApplication.screens()
 
-        if screen_index >= len(screens):
-            screen_index = 0
+        if self.screen_index >= len(screens):
+            self.screen_index = 0
 
-        screen_geom = screens[screen_index].geometry()
+        screen_geom = screens[self.screen_index].geometry()
         self.screen_width = screen_geom.width()
         self.screen_x = screen_geom.x()
         self.screen_y = screen_geom.y()
@@ -127,6 +129,26 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
             painter.setFont(font)
             painter.drawText(self.rect(), QtCore.Qt.AlignCenter, time_str)
+
+    def open_settings(self):
+        screens = QtGui.QGuiApplication.screens()
+        dialog = SettingsDialog(self, screens=screens, current_index=self.screen_index)
+        if dialog.exec() == QtWidgets.QDialog.Accepted:
+            selected = dialog.get_selected_screen_index()
+            self.move_to_screen(selected)
+
+    def move_to_screen(self, screen_index):
+        screens = QtGui.QGuiApplication.screens()
+        if screen_index >= len(screens):
+            return  # Invalid index
+        self.screen_index = screen_index
+        geom = screens[screen_index].geometry()
+        self.screen_width = geom.width()
+        self.screen_x = geom.x()
+        self.screen_y = geom.y()
+        self.setGeometry(self.screen_x, self.screen_y, self.screen_width, self.height())
+
+
 
 
 def main():
