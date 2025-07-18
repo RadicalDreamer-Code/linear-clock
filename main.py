@@ -8,12 +8,12 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
     def __init__(self):
         super().__init__()
 
-        # screen = QtGui.QGuiApplication.primaryScreen().geometry()
-        # self.screen_width = screen.width()
-        # self.screen_x = screen.x()
-        # self.screen_y = screen.y()
-
-        self.screen_index = 1  # 0 - primary, 1 - secondary, etc.
+        # Initialize QSettings
+        self.settings = QtCore.QSettings("LinearClock", "LinearClock")
+        
+        # Load settings or use defaults
+        self.load_settings()
+        
         screens = QtGui.QGuiApplication.screens()
 
         if self.screen_index >= len(screens):
@@ -53,6 +53,17 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
 
         self.show()
 
+    def load_settings(self):
+        """Load settings from QSettings or use defaults"""
+        self.screen_index = self.settings.value("screen_index", 0, type=int)
+        self.bar_position = self.settings.value("bar_position", "top", type=str)
+
+    def save_settings(self):
+        """Save current settings to QSettings"""
+        self.settings.setValue("screen_index", self.screen_index)
+        self.settings.setValue("bar_position", self.bar_position)
+        self.settings.sync()  # Ensure settings are written to disk
+
     def create_tray_icon(self):
         self.tray_icon = QtWidgets.QSystemTrayIcon(self)
         icon = QtGui.QIcon.fromTheme("clock")
@@ -82,13 +93,9 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             3000  # 3 seconds
         )
 
-    def open_settings(self):
-        # Placeholder for future settings window
-        QtWidgets.QMessageBox.information(self, "Settings", "Settings window not implemented yet.")
-
     def enterEvent(self, event):
-        # Animate to full height
-        target_rect = QtCore.QRect(self.screen_x, self.screen_y, self.screen_width, self.full_height)
+        # Animate to full height based on current position
+        target_rect = self.get_full_geometry()
         self.animation.stop()
         self.animation.setStartValue(self.geometry())
         self.animation.setEndValue(target_rect)
@@ -102,51 +109,151 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
 
     def animate_to_slim(self):
         if not self.underMouse():
-            target_rect = QtCore.QRect(self.screen_x, self.screen_y, self.screen_width, self.slim_height)
+            target_rect = self.get_slim_geometry()
             self.animation.stop()
             self.animation.setStartValue(self.geometry())
             self.animation.setEndValue(target_rect)
             self.animation.start()
 
     def paintEvent(self, event):
+        now = datetime.datetime.now()
+        seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
+        total_seconds = 24 * 60 * 60
+        progress = seconds_since_midnight / total_seconds
+
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
-        now = datetime.datetime.now()
-        seconds = now.hour * 3600 + now.minute * 60 + now.second
-        ratio = seconds / (24 * 3600)
-        width = self.width() * ratio
+        rect = self.rect()
+        bar_color = QtGui.QColor(0, 255, 0, 120)  # Transparent green
+        time_str = now.strftime("%H:%M:%S")
 
-        # Draw semi-transparent green bar
-        color = QtGui.QColor(0, 255, 0, 120)
-        painter.setBrush(color)
+        painter.setBrush(bar_color)
         painter.setPen(QtCore.Qt.NoPen)
-        painter.drawRect(0, 0, int(width), self.height())
 
-        if self.height() > 20:
-            time_str = now.strftime("%H:%M:%S")
-            painter.setPen(QtGui.QColor(255, 255, 255))
+        if self.bar_position in ["top", "bottom"]:
+            fill_width = int(rect.width() * progress)
+            painter.drawRect(0, 0, fill_width, rect.height())
+
+            # Draw time centered
+            painter.setPen(QtGui.QColor("white"))
             font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
+            font.setPointSize(12)
             painter.setFont(font)
-            painter.drawText(self.rect(), QtCore.Qt.AlignCenter, time_str)
+            painter.drawText(rect, QtCore.Qt.AlignCenter, time_str)
+
+        elif self.bar_position == "left":
+            fill_height = int(rect.height() * progress)
+            painter.drawRect(0, 0, rect.width(), fill_height)
+
+            # Rotate text vertically (bottom-up)
+            painter.save()
+            painter.translate(rect.center().x(), rect.center().y())
+            painter.rotate(-90)
+            painter.setPen(QtGui.QColor("white"))
+            font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
+            font.setPointSize(12)
+            painter.setFont(font)
+            painter.drawText(QtCore.QRect(-rect.height() // 2, -rect.width() // 2,
+                                        rect.height(), rect.width()),
+                            QtCore.Qt.AlignCenter, time_str)
+            painter.restore()
+
+        elif self.bar_position == "right":
+            fill_height = int(rect.height() * progress)
+            painter.drawRect(0, rect.height() - fill_height, rect.width(), fill_height)
+
+            # Rotate text vertically (top-down)
+            painter.save()
+            painter.translate(rect.center().x(), rect.center().y())
+            painter.rotate(90)
+            painter.setPen(QtGui.QColor("white"))
+            font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
+            font.setPointSize(12)
+            painter.setFont(font)
+            painter.drawText(QtCore.QRect(-rect.height() // 2, -rect.width() // 2,
+                                        rect.height(), rect.width()),
+                            QtCore.Qt.AlignCenter, time_str)
+            painter.restore()
+
 
     def open_settings(self):
         screens = QtGui.QGuiApplication.screens()
-        dialog = SettingsDialog(self, screens=screens, current_index=self.screen_index)
+        dialog = SettingsDialog(self, screens=screens, current_index=self.screen_index, position=self.bar_position)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
-            selected = dialog.get_selected_screen_index()
-            self.move_to_screen(selected)
+            selected_index, selected_position = dialog.get_settings()
+            self.bar_position = selected_position
+            self.move_to_screen(selected_index, self.bar_position)
+            # Save settings after change
+            self.save_settings()
 
-    def move_to_screen(self, screen_index):
+
+    def move_to_screen(self, screen_index, position='top'):
         screens = QtGui.QGuiApplication.screens()
         if screen_index >= len(screens):
-            return  # Invalid index
+            return
+
         self.screen_index = screen_index
-        geom = screens[screen_index].geometry()
-        self.screen_width = geom.width()
-        self.screen_x = geom.x()
-        self.screen_y = geom.y()
-        self.setGeometry(self.screen_x, self.screen_y, self.screen_width, self.height())
+        self.bar_position = position
+        
+        # Update screen dimensions for current screen
+        screen_geom = screens[self.screen_index].geometry()
+        self.screen_width = screen_geom.width()
+        self.screen_x = screen_geom.x()
+        self.screen_y = screen_geom.y()
+        
+        # Set to slim geometry initially
+        slim_rect = self.get_slim_geometry()
+        self.setGeometry(slim_rect)
+        
+        self.update()
+
+    def get_slim_geometry(self):
+        """Get the geometry for slim (collapsed) state based on current position"""
+        screens = QtGui.QGuiApplication.screens()
+        if self.screen_index >= len(screens):
+            return QtCore.QRect(0, 0, 100, 5)  # fallback
+        
+        geom = screens[self.screen_index].geometry()
+        width = geom.width()
+        height = geom.height()
+        x = geom.x()
+        y = geom.y()
+        
+        if self.bar_position == 'top':
+            return QtCore.QRect(x, y, width, self.slim_height)
+        elif self.bar_position == 'bottom':
+            return QtCore.QRect(x, y + height - self.slim_height, width, self.slim_height)
+        elif self.bar_position == 'left':
+            return QtCore.QRect(x, y, self.slim_height, height)
+        elif self.bar_position == 'right':
+            return QtCore.QRect(x + width - self.slim_height, y, self.slim_height, height)
+        
+        return QtCore.QRect(x, y, width, self.slim_height)  # default to top
+
+    def get_full_geometry(self):
+        """Get the geometry for full (expanded) state based on current position"""
+        screens = QtGui.QGuiApplication.screens()
+        if self.screen_index >= len(screens):
+            return QtCore.QRect(0, 0, 100, 30)  # fallback
+        
+        geom = screens[self.screen_index].geometry()
+        width = geom.width()
+        height = geom.height()
+        x = geom.x()
+        y = geom.y()
+        
+        if self.bar_position == 'top':
+            return QtCore.QRect(x, y, width, self.full_height)
+        elif self.bar_position == 'bottom':
+            return QtCore.QRect(x, y + height - self.full_height, width, self.full_height)
+        elif self.bar_position == 'left':
+            return QtCore.QRect(x, y, self.full_height, height)
+        elif self.bar_position == 'right':
+            return QtCore.QRect(x + width - self.full_height, y, self.full_height, height)
+        
+        return QtCore.QRect(x, y, width, self.full_height)  # default to top
+
 
 
 
