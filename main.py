@@ -1,8 +1,10 @@
 import sys
 import datetime
 from PySide6 import QtCore, QtGui, QtWidgets
+import uuid
 
 from screen_dialog import SettingsDialog
+from task_dialog import TaskDialog
 
 class AnimatedToggleClockBar(QtWidgets.QWidget):
     def __init__(self):
@@ -39,6 +41,18 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents, False)
 
         self.setMouseTracking(True)
+        
+        # Task management
+        self.hover_task_id = None  # Track which task is being hovered over
+        self.tooltip_timer = QtCore.QTimer()
+        self.tooltip_timer.setSingleShot(True)
+        self.tooltip_timer.timeout.connect(self.show_task_tooltip)
+        
+        # Click handling
+        self.click_timer = QtCore.QTimer()
+        self.click_timer.setSingleShot(True)
+        self.click_timer.timeout.connect(self.handle_single_click)
+        self.pending_click_pos = None
 
         # Animation setup
         self.animation = QtCore.QPropertyAnimation(self, b"geometry")
@@ -46,17 +60,107 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         self.animation.setEasingCurve(QtCore.QEasingCurve.InOutQuad)
 
         self.timer = QtCore.QTimer(self)
-        self.timer.timeout.connect(self.update)
+        self.timer.timeout.connect(self.update_clock)
         self.timer.start(1000)
 
         self.create_tray_icon()
 
         self.show()
 
+    def update_clock(self):
+        """Update the clock and check for task notifications"""
+        now = datetime.datetime.now()
+        current_time = now.time()
+        
+        # Check for task notifications
+        self.check_task_notifications(current_time)
+        
+        # Update the widget
+        self.update()
+
+    def check_task_notifications(self, current_time):
+        """Check if any tasks should trigger notifications"""
+        for task_id, task_data in self.tasks.items():
+            if task_id not in self.notified_tasks:
+                task_time = task_data['time']
+                
+                # Check if current time has reached or passed the task time
+                # Convert both times to seconds for comparison
+                current_seconds = current_time.hour * 3600 + current_time.minute * 60 + current_time.second
+                task_seconds = task_time.hour * 3600 + task_time.minute * 60 + task_time.second
+                
+                # Notify if current time is within 1 second of task time (to handle timer resolution)
+                if abs(current_seconds - task_seconds) <= 1:
+                    self.show_task_notification(task_data['name'], task_time)
+                    self.notified_tasks.add(task_id)
+
+    def show_task_notification(self, task_name, task_time):
+        """Show a system tray notification for a task"""
+        if hasattr(self, 'tray_icon') and self.tray_icon:
+            time_str = task_time.strftime("%H:%M:%S")
+            self.tray_icon.showMessage(
+                "Task Reminder",
+                f"{time_str} - {task_name}",
+                QtWidgets.QSystemTrayIcon.Information,
+                5000  # 5 seconds
+            )
+
     def load_settings(self):
         """Load settings from QSettings or use defaults"""
         self.screen_index = self.settings.value("screen_index", 0, type=int)
         self.bar_position = self.settings.value("bar_position", "top", type=str)
+        
+        # Initialize tasks for today
+        self.tasks = {}  # Dictionary: task_id -> {'time': time_obj, 'name': str}
+        self.notified_tasks = set()  # Track tasks that have already been notified
+        self.load_tasks()
+
+    def load_tasks(self):
+        """Load tasks for today from QSettings"""
+        today = datetime.date.today().isoformat()
+        
+        # Reset notified tasks when loading (e.g., new day or app restart)
+        self.notified_tasks.clear()
+        
+        size = self.settings.beginReadArray(f"tasks_{today}")
+        for i in range(size):
+            self.settings.setArrayIndex(i)
+            task_id = self.settings.value("id", type=str)
+            time_str = self.settings.value("time", type=str)
+            name = self.settings.value("name", type=str)
+            
+            if task_id and time_str and name:
+                try:
+                    time_obj = datetime.time.fromisoformat(time_str)
+                    self.tasks[task_id] = {'time': time_obj, 'name': name}
+                    
+                    # Check if task time has already passed today
+                    now = datetime.datetime.now().time()
+                    current_seconds = now.hour * 3600 + now.minute * 60 + now.second
+                    task_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
+                    
+                    # If task time has already passed, mark it as notified
+                    if current_seconds > task_seconds:
+                        self.notified_tasks.add(task_id)
+                        
+                except ValueError:
+                    pass  # Skip invalid time formats
+        
+        self.settings.endArray()
+
+    def save_tasks(self):
+        """Save current tasks to QSettings"""
+        today = datetime.date.today().isoformat()
+        self.settings.beginWriteArray(f"tasks_{today}")
+        
+        for i, (task_id, task_data) in enumerate(self.tasks.items()):
+            self.settings.setArrayIndex(i)
+            self.settings.setValue("id", task_id)
+            self.settings.setValue("time", task_data['time'].isoformat())
+            self.settings.setValue("name", task_data['name'])
+        
+        self.settings.endArray()
+        self.settings.sync()
 
     def save_settings(self):
         """Save current settings to QSettings"""
@@ -115,6 +219,145 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             self.animation.setEndValue(target_rect)
             self.animation.start()
 
+    def mouseDoubleClickEvent(self, event):
+        """Handle double-click to create new task"""
+        if event.button() == QtCore.Qt.LeftButton:
+            # Cancel any pending single click
+            self.click_timer.stop()
+            self.pending_click_pos = None
+            
+            # Calculate time based on click position
+            click_time = self.get_time_from_position(event.position())
+            
+            # Show task dialog
+            dialog = TaskDialog(self, click_time)
+            if dialog.exec() == QtWidgets.QDialog.Accepted:
+                time_obj, task_name, _ = dialog.get_task_data()
+                if task_name:  # Only add if name is not empty
+                    task_id = str(uuid.uuid4())
+                    self.tasks[task_id] = {'time': time_obj, 'name': task_name}
+                    
+                    # Check if task time has already passed today
+                    now = datetime.datetime.now().time()
+                    current_seconds = now.hour * 3600 + now.minute * 60 + now.second
+                    task_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
+                    
+                    # If task time has already passed, mark it as notified
+                    if current_seconds > task_seconds:
+                        self.notified_tasks.add(task_id)
+                    
+                    self.save_tasks()
+                    self.update()
+        
+        super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        """Handle single click on task markers with delay to avoid conflict with double-click"""
+        if event.button() == QtCore.Qt.LeftButton:
+            # Store the click position and start timer
+            self.pending_click_pos = event.position()
+            self.click_timer.start(300)  # Wait 300ms to see if it's a double-click
+        
+        super().mousePressEvent(event)
+
+    def handle_single_click(self):
+        """Handle delayed single click"""
+        if self.pending_click_pos is not None:
+            task_id = self.get_task_at_position(self.pending_click_pos)
+            if task_id:
+                # Edit existing task
+                task_data = self.tasks[task_id]
+                dialog = TaskDialog(self, task_data['time'], task_data['name'], task_id)
+                if dialog.exec() == QtWidgets.QDialog.Accepted:
+                    time_obj, task_name, deleted = dialog.get_task_data()
+                    if deleted:
+                        del self.tasks[task_id]
+                        self.notified_tasks.discard(task_id)  # Remove from notified set
+                    elif task_name:  # Only update if name is not empty
+                        self.tasks[task_id] = {'time': time_obj, 'name': task_name}
+                        
+                        # Reset notification state when task is modified
+                        self.notified_tasks.discard(task_id)
+                        
+                        # Check if task time has already passed today
+                        now = datetime.datetime.now().time()
+                        current_seconds = now.hour * 3600 + now.minute * 60 + now.second
+                        task_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
+                        
+                        # If task time has already passed, mark it as notified
+                        if current_seconds > task_seconds:
+                            self.notified_tasks.add(task_id)
+                    else:
+                        del self.tasks[task_id]  # Delete if name is empty
+                        self.notified_tasks.discard(task_id)  # Remove from notified set
+                    self.save_tasks()
+                    self.update()
+            
+            self.pending_click_pos = None
+
+    def mouseMoveEvent(self, event):
+        """Handle mouse move for task tooltips"""
+        task_id = self.get_task_at_position(event.position())
+        
+        if task_id != self.hover_task_id:
+            self.hover_task_id = task_id
+            QtWidgets.QToolTip.hideText()
+            
+            if task_id:
+                self.tooltip_timer.start(500)  # Show tooltip after 500ms
+            else:
+                self.tooltip_timer.stop()
+        
+        super().mouseMoveEvent(event)
+
+    def show_task_tooltip(self):
+        """Show tooltip for hovered task"""
+        if self.hover_task_id and self.hover_task_id in self.tasks:
+            task_data = self.tasks[self.hover_task_id]
+            tooltip_text = f"{task_data['time'].strftime('%H:%M:%S')} - {task_data['name']}"
+            QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), tooltip_text, self)
+
+    def get_time_from_position(self, pos):
+        """Convert mouse position to time of day"""
+        rect = self.rect()
+        
+        if self.bar_position in ["top", "bottom"]:
+            progress = pos.x() / rect.width()
+        else:  # left or right
+            progress = pos.y() / rect.height()
+        
+        # Clamp progress between 0 and 1
+        progress = max(0, min(1, progress))
+        
+        # Convert to time
+        total_seconds = int(progress * 24 * 60 * 60)
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        return datetime.time(hours, minutes, seconds)
+
+    def get_task_at_position(self, pos):
+        """Get task ID at mouse position (if any)"""
+        rect = self.rect()
+        click_tolerance = 5  # pixels
+        
+        for task_id, task_data in self.tasks.items():
+            task_time = task_data['time']
+            task_seconds = task_time.hour * 3600 + task_time.minute * 60 + task_time.second
+            task_progress = task_seconds / (24 * 60 * 60)
+            
+            if self.bar_position in ["top", "bottom"]:
+                task_x = int(rect.width() * task_progress)
+                if abs(pos.x() - task_x) <= click_tolerance:
+                    return task_id
+            else:  # left or right
+                task_y = int(rect.height() * task_progress)
+                if abs(pos.y() - task_y) <= click_tolerance:
+                    return task_id
+        
+        return None
+
     def paintEvent(self, event):
         now = datetime.datetime.now()
         seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
@@ -128,6 +371,12 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         bar_color = QtGui.QColor(0, 255, 0, 120)  # Transparent green
         time_str = now.strftime("%H:%M:%S")
 
+        # Fill entire widget area with transparent background to make it reactive to mouse events
+        painter.setBrush(QtGui.QColor(0, 0, 0, 1))  # Almost transparent black
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.drawRect(rect)
+
+        # Draw the progress bar
         painter.setBrush(bar_color)
         painter.setPen(QtCore.Qt.NoPen)
 
@@ -135,46 +384,74 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             fill_width = int(rect.width() * progress)
             painter.drawRect(0, 0, fill_width, rect.height())
 
-            # Draw time centered
-            painter.setPen(QtGui.QColor("white"))
-            font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
-            font.setPointSize(12)
-            painter.setFont(font)
-            painter.drawText(rect, QtCore.Qt.AlignCenter, time_str)
+            # Draw time centered only when fully expanded
+            if rect.height() >= self.full_height:
+                painter.setPen(QtGui.QColor("white"))
+                font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
+                font.setPointSize(12)
+                painter.setFont(font)
+                painter.drawText(rect, QtCore.Qt.AlignCenter, time_str)
 
         elif self.bar_position == "left":
             fill_height = int(rect.height() * progress)
             painter.drawRect(0, 0, rect.width(), fill_height)
 
-            # Rotate text vertically (bottom-up)
-            painter.save()
-            painter.translate(rect.center().x(), rect.center().y())
-            painter.rotate(-90)
-            painter.setPen(QtGui.QColor("white"))
-            font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
-            font.setPointSize(12)
-            painter.setFont(font)
-            painter.drawText(QtCore.QRect(-rect.height() // 2, -rect.width() // 2,
-                                        rect.height(), rect.width()),
-                            QtCore.Qt.AlignCenter, time_str)
-            painter.restore()
+            # Rotate text vertically (bottom-up) only when fully expanded
+            if rect.width() >= self.full_height:
+                painter.save()
+                painter.translate(rect.center().x(), rect.center().y())
+                painter.rotate(-90)
+                painter.setPen(QtGui.QColor("white"))
+                font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
+                font.setPointSize(12)
+                painter.setFont(font)
+                painter.drawText(QtCore.QRect(-rect.height() // 2, -rect.width() // 2,
+                                            rect.height(), rect.width()),
+                                QtCore.Qt.AlignCenter, time_str)
+                painter.restore()
 
         elif self.bar_position == "right":
             fill_height = int(rect.height() * progress)
             painter.drawRect(0, rect.height() - fill_height, rect.width(), fill_height)
 
-            # Rotate text vertically (top-down)
-            painter.save()
-            painter.translate(rect.center().x(), rect.center().y())
-            painter.rotate(90)
-            painter.setPen(QtGui.QColor("white"))
-            font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
-            font.setPointSize(12)
-            painter.setFont(font)
-            painter.drawText(QtCore.QRect(-rect.height() // 2, -rect.width() // 2,
-                                        rect.height(), rect.width()),
-                            QtCore.Qt.AlignCenter, time_str)
-            painter.restore()
+            # Rotate text vertically (top-down) only when fully expanded
+            if rect.width() >= self.full_height:
+                painter.save()
+                painter.translate(rect.center().x(), rect.center().y())
+                painter.rotate(90)
+                painter.setPen(QtGui.QColor("white"))
+                font = QtGui.QFont("Arial", 12, QtGui.QFont.Bold)
+                font.setPointSize(12)
+                painter.setFont(font)
+                painter.drawText(QtCore.QRect(-rect.height() // 2, -rect.width() // 2,
+                                            rect.height(), rect.width()),
+                                QtCore.Qt.AlignCenter, time_str)
+                painter.restore()
+
+        # Draw task markers
+        self.draw_task_markers(painter, rect)
+
+    def draw_task_markers(self, painter, rect):
+        """Draw vertical lines for task markers"""
+        if not self.tasks:
+            return
+        
+        # Set up pen for task markers
+        painter.setPen(QtGui.QPen(QtGui.QColor("red"), 2))
+        
+        for task_id, task_data in self.tasks.items():
+            task_time = task_data['time']
+            task_seconds = task_time.hour * 3600 + task_time.minute * 60 + task_time.second
+            task_progress = task_seconds / (24 * 60 * 60)
+            
+            if self.bar_position in ["top", "bottom"]:
+                # Draw vertical line
+                x = int(rect.width() * task_progress)
+                painter.drawLine(x, 0, x, rect.height())
+            else:  # left or right
+                # Draw horizontal line
+                y = int(rect.height() * task_progress)
+                painter.drawLine(0, y, rect.width(), y)
 
 
     def open_settings(self):
