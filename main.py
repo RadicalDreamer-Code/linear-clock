@@ -80,17 +80,28 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
 
     def check_task_notifications(self, current_time):
         """Check if any tasks should trigger notifications"""
+        # Only check for notifications if current time is within the configured range
+        if not self.is_time_in_range(current_time):
+            return
+            
+        current_progress = self.get_time_range_info()['progress']
+            
         for task_id, task_data in self.tasks.items():
             if task_id not in self.notified_tasks:
                 task_time = task_data['time']
                 
-                # Check if current time has reached or passed the task time
-                # Convert both times to seconds for comparison
-                current_seconds = current_time.hour * 3600 + current_time.minute * 60 + current_time.second
-                task_seconds = task_time.hour * 3600 + task_time.minute * 60 + task_time.second
+                # Only notify for tasks within the configured time range
+                if not self.is_time_in_range(task_time):
+                    continue
                 
-                # Notify if current time is within 1 second of task time (to handle timer resolution)
-                if abs(current_seconds - task_seconds) <= 1:
+                task_progress = self.time_to_progress(task_time)
+                
+                # Check if current progress has reached or passed the task progress
+                # Use a small tolerance to handle timer resolution (equivalent to ~1 second)
+                time_info = self.get_time_range_info()
+                tolerance = 1.0 / time_info['total_duration'] if time_info['total_duration'] > 0 else 0.001
+                
+                if abs(current_progress - task_progress) <= tolerance:
                     self.show_task_notification(task_data['name'], task_time)
                     self.notified_tasks.add(task_id)
 
@@ -109,6 +120,18 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         """Load settings from QSettings or use defaults"""
         self.screen_index = self.settings.value("screen_index", 0, type=int)
         self.bar_position = self.settings.value("bar_position", "top", type=str)
+        
+        # Load time range settings
+        start_time_str = self.settings.value("start_time", "00:00:00", type=str)
+        end_time_str = self.settings.value("end_time", "23:59:59", type=str)
+        
+        try:
+            self.start_time = datetime.time.fromisoformat(start_time_str)
+            self.end_time = datetime.time.fromisoformat(end_time_str)
+        except ValueError:
+            # Fallback to default times if parsing fails
+            self.start_time = datetime.time(0, 0, 0)
+            self.end_time = datetime.time(23, 59, 59)
         
         # Initialize tasks for today
         self.tasks = {}  # Dictionary: task_id -> {'time': time_obj, 'name': str}
@@ -134,14 +157,17 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
                     time_obj = datetime.time.fromisoformat(time_str)
                     self.tasks[task_id] = {'time': time_obj, 'name': name}
                     
-                    # Check if task time has already passed today
-                    now = datetime.datetime.now().time()
-                    current_seconds = now.hour * 3600 + now.minute * 60 + now.second
-                    task_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
-                    
-                    # If task time has already passed, mark it as notified
-                    if current_seconds > task_seconds:
-                        self.notified_tasks.add(task_id)
+                    # Check if task time has already passed within the configured time range
+                    if self.is_time_in_range(time_obj):
+                        now = datetime.datetime.now().time()
+                        if self.is_time_in_range(now):
+                            # Both task and current time are in range, compare progress
+                            current_progress = self.get_time_range_info()['progress']
+                            task_progress = self.time_to_progress(time_obj)
+                            
+                            # If current progress has passed task progress, mark as notified
+                            if current_progress > task_progress:
+                                self.notified_tasks.add(task_id)
                         
                 except ValueError:
                     pass  # Skip invalid time formats
@@ -166,6 +192,8 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         """Save current settings to QSettings"""
         self.settings.setValue("screen_index", self.screen_index)
         self.settings.setValue("bar_position", self.bar_position)
+        self.settings.setValue("start_time", self.start_time.isoformat())
+        self.settings.setValue("end_time", self.end_time.isoformat())
         self.settings.sync()  # Ensure settings are written to disk
 
     def create_tray_icon(self):
@@ -237,14 +265,17 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
                     task_id = str(uuid.uuid4())
                     self.tasks[task_id] = {'time': time_obj, 'name': task_name}
                     
-                    # Check if task time has already passed today
-                    now = datetime.datetime.now().time()
-                    current_seconds = now.hour * 3600 + now.minute * 60 + now.second
-                    task_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
-                    
-                    # If task time has already passed, mark it as notified
-                    if current_seconds > task_seconds:
-                        self.notified_tasks.add(task_id)
+                    # Check if task time has already passed within the configured time range
+                    if self.is_time_in_range(time_obj):
+                        now = datetime.datetime.now().time()
+                        if self.is_time_in_range(now):
+                            # Both task and current time are in range, compare progress
+                            current_progress = self.get_time_range_info()['progress']
+                            task_progress = self.time_to_progress(time_obj)
+                            
+                            # If current progress has passed task progress, mark as notified
+                            if current_progress > task_progress:
+                                self.notified_tasks.add(task_id)
                     
                     self.save_tasks()
                     self.update()
@@ -279,14 +310,17 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
                         # Reset notification state when task is modified
                         self.notified_tasks.discard(task_id)
                         
-                        # Check if task time has already passed today
-                        now = datetime.datetime.now().time()
-                        current_seconds = now.hour * 3600 + now.minute * 60 + now.second
-                        task_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
-                        
-                        # If task time has already passed, mark it as notified
-                        if current_seconds > task_seconds:
-                            self.notified_tasks.add(task_id)
+                        # Check if task time has already passed within the configured time range
+                        if self.is_time_in_range(time_obj):
+                            now = datetime.datetime.now().time()
+                            if self.is_time_in_range(now):
+                                # Both task and current time are in range, compare progress
+                                current_progress = self.get_time_range_info()['progress']
+                                task_progress = self.time_to_progress(time_obj)
+                                
+                                # If current progress has passed task progress, mark as notified
+                                if current_progress > task_progress:
+                                    self.notified_tasks.add(task_id)
                     else:
                         del self.tasks[task_id]  # Delete if name is empty
                         self.notified_tasks.discard(task_id)  # Remove from notified set
@@ -318,7 +352,7 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), tooltip_text, self)
 
     def get_time_from_position(self, pos):
-        """Convert mouse position to time of day"""
+        """Convert mouse position to time of day within the configured range"""
         rect = self.rect()
         
         if self.bar_position in ["top", "bottom"]:
@@ -329,13 +363,8 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         # Clamp progress between 0 and 1
         progress = max(0, min(1, progress))
         
-        # Convert to time
-        total_seconds = int(progress * 24 * 60 * 60)
-        hours = total_seconds // 3600
-        minutes = (total_seconds % 3600) // 60
-        seconds = total_seconds % 60
-        
-        return datetime.time(hours, minutes, seconds)
+        # Convert progress to time within the configured range
+        return self.progress_to_time(progress)
 
     def get_task_at_position(self, pos):
         """Get task ID at mouse position (if any)"""
@@ -344,8 +373,7 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         
         for task_id, task_data in self.tasks.items():
             task_time = task_data['time']
-            task_seconds = task_time.hour * 3600 + task_time.minute * 60 + task_time.second
-            task_progress = task_seconds / (24 * 60 * 60)
+            task_progress = self.time_to_progress(task_time)
             
             if self.bar_position in ["top", "bottom"]:
                 task_x = int(rect.width() * task_progress)
@@ -358,23 +386,128 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         
         return None
 
+    def get_time_range_info(self):
+        """Calculate time range duration and current progress"""
+        now = datetime.datetime.now().time()
+        
+        # Convert times to seconds since midnight
+        start_seconds = self.start_time.hour * 3600 + self.start_time.minute * 60 + self.start_time.second
+        end_seconds = self.end_time.hour * 3600 + self.end_time.minute * 60 + self.end_time.second
+        current_seconds = now.hour * 3600 + now.minute * 60 + now.second
+        
+        # Handle case where end time is next day (e.g., 18:00 to 06:00)
+        if end_seconds <= start_seconds:
+            # Range spans midnight
+            total_duration = (24 * 3600 - start_seconds) + end_seconds
+            
+            if current_seconds >= start_seconds:
+                # Current time is after start time (same day)
+                elapsed = current_seconds - start_seconds
+            else:
+                # Current time is before end time (next day)
+                elapsed = (24 * 3600 - start_seconds) + current_seconds
+        else:
+            # Normal range within same day
+            total_duration = end_seconds - start_seconds
+            elapsed = current_seconds - start_seconds
+            
+            # Clamp elapsed to valid range
+            elapsed = max(0, min(elapsed, total_duration))
+        
+        # Calculate progress (0.0 to 1.0)
+        if total_duration > 0:
+            progress = elapsed / total_duration
+        else:
+            progress = 0.0
+            
+        return {
+            'progress': max(0.0, min(1.0, progress)),
+            'total_duration': total_duration,
+            'elapsed': elapsed,
+            'is_in_range': self.is_time_in_range(now)
+        }
+
+    def is_time_in_range(self, time_obj):
+        """Check if a given time is within the configured time range"""
+        time_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
+        start_seconds = self.start_time.hour * 3600 + self.start_time.minute * 60 + self.start_time.second
+        end_seconds = self.end_time.hour * 3600 + self.end_time.minute * 60 + self.end_time.second
+        
+        if end_seconds <= start_seconds:
+            # Range spans midnight
+            return time_seconds >= start_seconds or time_seconds <= end_seconds
+        else:
+            # Normal range within same day
+            return start_seconds <= time_seconds <= end_seconds
+
+    def time_to_progress(self, time_obj):
+        """Convert a time object to progress value (0.0 to 1.0) within the configured range"""
+        time_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
+        start_seconds = self.start_time.hour * 3600 + self.start_time.minute * 60 + self.start_time.second
+        end_seconds = self.end_time.hour * 3600 + self.end_time.minute * 60 + self.end_time.second
+        
+        if end_seconds <= start_seconds:
+            # Range spans midnight
+            total_duration = (24 * 3600 - start_seconds) + end_seconds
+            
+            if time_seconds >= start_seconds:
+                elapsed = time_seconds - start_seconds
+            else:
+                elapsed = (24 * 3600 - start_seconds) + time_seconds
+        else:
+            # Normal range within same day
+            total_duration = end_seconds - start_seconds
+            elapsed = time_seconds - start_seconds
+            elapsed = max(0, min(elapsed, total_duration))
+        
+        if total_duration > 0:
+            return elapsed / total_duration
+        return 0.0
+
+    def progress_to_time(self, progress):
+        """Convert progress value (0.0 to 1.0) to time object within the configured range"""
+        progress = max(0.0, min(1.0, progress))
+        
+        start_seconds = self.start_time.hour * 3600 + self.start_time.minute * 60 + self.start_time.second
+        end_seconds = self.end_time.hour * 3600 + self.end_time.minute * 60 + self.end_time.second
+        
+        if end_seconds <= start_seconds:
+            # Range spans midnight
+            total_duration = (24 * 3600 - start_seconds) + end_seconds
+        else:
+            # Normal range within same day
+            total_duration = end_seconds - start_seconds
+        
+        elapsed_seconds = int(progress * total_duration)
+        target_seconds = (start_seconds + elapsed_seconds) % (24 * 3600)
+        
+        hours = target_seconds // 3600
+        minutes = (target_seconds % 3600) // 60
+        seconds = target_seconds % 60
+        
+        return datetime.time(hours, minutes, seconds)
+
     def paintEvent(self, event):
         now = datetime.datetime.now()
-        seconds_since_midnight = now.hour * 3600 + now.minute * 60 + now.second
-        total_seconds = 24 * 60 * 60
-        progress = seconds_since_midnight / total_seconds
+        time_info = self.get_time_range_info()
+        progress = time_info['progress']
 
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.Antialiasing)
 
         rect = self.rect()
-        bar_color = QtGui.QColor(0, 255, 0, 120)  # Transparent green
         time_str = now.strftime("%H:%M:%S")
 
         # Fill entire widget area with transparent background to make it reactive to mouse events
         painter.setBrush(QtGui.QColor(0, 0, 0, 1))  # Almost transparent black
         painter.setPen(QtCore.Qt.NoPen)
         painter.drawRect(rect)
+
+        # Choose bar color based on whether current time is in range
+        if time_info['is_in_range']:
+            bar_color = QtGui.QColor(0, 255, 0, 120)  # Transparent green (in range)
+        else:
+            bar_color = QtGui.QColor(128, 128, 128, 120)  # Transparent gray (out of range)
 
         # Draw the progress bar
         painter.setBrush(bar_color)
@@ -441,8 +574,12 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         
         for task_id, task_data in self.tasks.items():
             task_time = task_data['time']
-            task_seconds = task_time.hour * 3600 + task_time.minute * 60 + task_time.second
-            task_progress = task_seconds / (24 * 60 * 60)
+            
+            # Only show tasks that are within the configured time range
+            if not self.is_time_in_range(task_time):
+                continue
+                
+            task_progress = self.time_to_progress(task_time)
             
             if self.bar_position in ["top", "bottom"]:
                 # Draw vertical line
@@ -456,10 +593,13 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
 
     def open_settings(self):
         screens = QtGui.QGuiApplication.screens()
-        dialog = SettingsDialog(self, screens=screens, current_index=self.screen_index, position=self.bar_position)
+        dialog = SettingsDialog(self, screens=screens, current_index=self.screen_index, 
+                               position=self.bar_position, start_time=self.start_time, end_time=self.end_time)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
-            selected_index, selected_position = dialog.get_settings()
+            selected_index, selected_position, start_time, end_time = dialog.get_settings()
             self.bar_position = selected_position
+            self.start_time = start_time
+            self.end_time = end_time
             self.move_to_screen(selected_index, self.bar_position)
             # Save settings after change
             self.save_settings()
