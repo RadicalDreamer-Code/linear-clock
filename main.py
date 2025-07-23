@@ -1,5 +1,6 @@
 import sys
 import datetime
+import json
 from PySide6 import QtCore, QtGui, QtWidgets
 import uuid
 
@@ -167,6 +168,16 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         self.focused_task_id = None
         self.focused_task_time = None
         
+        # Task dragging settings
+        self.task_dragging_enabled = self.settings.value("task_dragging_enabled", True, type=bool)
+        self.drag_snap_seconds = self.settings.value("drag_snap_seconds", 10, type=int)
+        
+        # Task dragging state
+        self.dragging_task_id = None
+        self.drag_start_pos = None
+        self.drag_current_pos = None
+        self.drag_preview_time = None
+        
         # Initialize tasks for today
         self.tasks = {}  # Dictionary: task_id -> {'time': time_obj, 'name': str}
         self.notified_tasks = set()  # Track tasks that have already been notified
@@ -228,6 +239,8 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         self.settings.setValue("bar_position", self.bar_position)
         self.settings.setValue("start_time", self.start_time.isoformat())
         self.settings.setValue("end_time", self.end_time.isoformat())
+        self.settings.setValue("task_dragging_enabled", self.task_dragging_enabled)
+        self.settings.setValue("drag_snap_seconds", self.drag_snap_seconds)
         self.settings.sync()  # Ensure settings are written to disk
 
     def create_tray_icon(self):
@@ -338,12 +351,89 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         if event.button() == QtCore.Qt.LeftButton:
             # Store the click position and start timer
             self.pending_click_pos = event.position()
+            
+            # Check if we're clicking on a task for potential dragging
+            if self.task_dragging_enabled:
+                task_id = self.get_task_at_position(event.position())
+                if task_id:
+                    self.drag_start_pos = event.position()
+                    self.dragging_task_id = task_id
+                    # Don't start click timer if we might be dragging
+                    self.setFocus()
+                    return
+            
             self.click_timer.start(300)  # Wait 300ms to see if it's a double-click
             
             # Set focus to enable keyboard events (like Ctrl+V)
             self.setFocus()
         
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Handle mouse release for task dragging"""
+        if event.button() == QtCore.Qt.LeftButton:
+            # Handle task drop
+            if self.dragging_task_id and self.drag_preview_time:
+                # Update task time to the new position
+                self.tasks[self.dragging_task_id]['time'] = self.drag_preview_time
+                
+                # Reset notification state for the moved task
+                self.notified_tasks.discard(self.dragging_task_id)
+                
+                # Check if new task time has already passed
+                if self.is_time_in_range(self.drag_preview_time):
+                    now = datetime.datetime.now().time()
+                    if self.is_time_in_range(now):
+                        current_progress = self.get_time_range_info()['progress']
+                        task_progress = self.time_to_progress(self.drag_preview_time)
+                        
+                        if current_progress > task_progress:
+                            self.notified_tasks.add(self.dragging_task_id)
+                
+                # Update focused task time if this is the focused task
+                if self.is_focused and self.focused_task_id == self.dragging_task_id:
+                    self.focused_task_time = self.drag_preview_time
+                    self.end_time = self.drag_preview_time
+                
+                # Save and update
+                self.save_tasks()
+                
+                # Show notification about the move
+                task_name = self.tasks[self.dragging_task_id]['name']
+                time_str = self.drag_preview_time.strftime("%H:%M:%S")
+                QtWidgets.QToolTip.showText(
+                    event.globalPosition().toPoint(),
+                    f"Moved '{task_name}' to {time_str}",
+                    self
+                )
+                QtCore.QTimer.singleShot(2000, QtWidgets.QToolTip.hideText)
+            
+            # Reset dragging state
+            self.dragging_task_id = None
+            self.drag_start_pos = None
+            self.drag_current_pos = None
+            self.drag_preview_time = None
+            
+            # Update display
+            self.update()
+        
+        super().mouseReleaseEvent(event)
+
+    def snap_time_to_interval(self, time_obj):
+        """Snap a time to the configured interval"""
+        total_seconds = time_obj.hour * 3600 + time_obj.minute * 60 + time_obj.second
+        
+        # Round to nearest snap interval
+        snapped_seconds = round(total_seconds / self.drag_snap_seconds) * self.drag_snap_seconds
+        
+        # Ensure we don't go over 24 hours
+        snapped_seconds = snapped_seconds % (24 * 3600)
+        
+        hours = snapped_seconds // 3600
+        minutes = (snapped_seconds % 3600) // 60
+        seconds = snapped_seconds % 60
+        
+        return datetime.time(hours, minutes, seconds)
 
     def handle_single_click(self):
         """Handle delayed single click"""
@@ -384,17 +474,43 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             self.pending_click_pos = None
 
     def mouseMoveEvent(self, event):
-        """Handle mouse move for task tooltips"""
-        task_id = self.get_task_at_position(event.position())
-        
-        if task_id != self.hover_task_id:
-            self.hover_task_id = task_id
-            QtWidgets.QToolTip.hideText()
+        """Handle mouse move for task tooltips and dragging"""
+        # Handle task dragging
+        if self.dragging_task_id and self.drag_start_pos:
+            # Calculate distance to determine if we're dragging
+            drag_distance = (event.position() - self.drag_start_pos).manhattanLength()
             
-            if task_id:
-                self.tooltip_timer.start(500)  # Show tooltip after 500ms
-            else:
+            if drag_distance > 5:  # Start dragging after 5 pixels
+                self.drag_current_pos = event.position()
+                
+                # Calculate preview time with snapping
+                preview_time = self.get_time_from_position(event.position())
+                self.drag_preview_time = self.snap_time_to_interval(preview_time)
+                
+                # Cancel any pending click timer since we're dragging
+                self.click_timer.stop()
+                self.pending_click_pos = None
+                
+                # Hide tooltip while dragging
+                QtWidgets.QToolTip.hideText()
                 self.tooltip_timer.stop()
+                
+                # Update display to show drag preview
+                self.update()
+                return
+        
+        # Regular tooltip handling (only if not dragging)
+        if not self.dragging_task_id:
+            task_id = self.get_task_at_position(event.position())
+            
+            if task_id != self.hover_task_id:
+                self.hover_task_id = task_id
+                QtWidgets.QToolTip.hideText()
+                
+                if task_id:
+                    self.tooltip_timer.start(500)  # Show tooltip after 500ms
+                else:
+                    self.tooltip_timer.stop()
         
         super().mouseMoveEvent(event)
 
@@ -629,6 +745,10 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         # Draw task markers
         self.draw_task_markers(painter, rect)
         
+        # Draw drag preview
+        if self.dragging_task_id and self.drag_preview_time:
+            self.draw_drag_preview(painter, rect)
+        
         # Draw focus indicator for the focused task
         if self.is_focused and self.focused_task_id in self.tasks:
             self.draw_focus_indicator(painter, rect)
@@ -642,6 +762,10 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
         painter.setPen(QtGui.QPen(QtGui.QColor("red"), 2))
         
         for task_id, task_data in self.tasks.items():
+            # Skip the task being dragged (it will be drawn as preview)
+            if task_id == self.dragging_task_id:
+                continue
+                
             task_time = task_data['time']
             
             # Only show tasks that are within the configured time range
@@ -663,9 +787,10 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
     def open_settings(self):
         screens = QtGui.QGuiApplication.screens()
         dialog = SettingsDialog(self, screens=screens, current_index=self.screen_index, 
-                               position=self.bar_position, start_time=self.start_time, end_time=self.end_time)
+                               position=self.bar_position, start_time=self.start_time, end_time=self.end_time,
+                               task_dragging_enabled=self.task_dragging_enabled, drag_snap_seconds=self.drag_snap_seconds)
         if dialog.exec() == QtWidgets.QDialog.Accepted:
-            selected_index, selected_position, start_time, end_time = dialog.get_settings()
+            selected_index, selected_position, start_time, end_time, drag_enabled, snap_seconds = dialog.get_settings()
             
             # Exit focus mode if settings are changed
             if self.is_focused:
@@ -674,6 +799,9 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             self.bar_position = selected_position
             self.start_time = start_time
             self.end_time = end_time
+            self.task_dragging_enabled = drag_enabled
+            self.drag_snap_seconds = snap_seconds
+            
             self.move_to_screen(selected_index, self.bar_position)
             # Save settings after change
             self.save_settings()
@@ -836,6 +964,16 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             
             export_file_action = import_submenu.addAction("Export to JSON File...")
             export_file_action.triggered.connect(self.export_json_file_dialog)
+            
+            menu.addSeparator()
+            
+            # Add drag status info
+            if self.task_dragging_enabled:
+                drag_info = menu.addAction(f"✓ Dragging enabled (snap: {self.drag_snap_seconds}s)")
+                drag_info.setEnabled(False)
+            else:
+                drag_info = menu.addAction("✗ Dragging disabled")
+                drag_info.setEnabled(False)
             
             menu.addSeparator()
             
@@ -1041,8 +1179,6 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
     def import_tasks_from_json(self, file_path):
         """Import tasks from a JSON file"""
         try:
-            import json
-            
             with open(file_path, 'r', encoding='utf-8') as file:
                 data = json.load(file)
             
@@ -1227,8 +1363,6 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
     def export_tasks_to_json(self, file_path):
         """Export current tasks to a JSON file"""
         try:
-            import json
-            
             # Prepare tasks data for export
             tasks_data = []
             for task_id, task_data in self.tasks.items():
@@ -1293,8 +1427,6 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
             return
         
         try:
-            import json
-            
             # Try to parse the clipboard content as JSON
             data = json.loads(clipboard_text)
             
@@ -1443,11 +1575,67 @@ class AnimatedToggleClockBar(QtWidgets.QWidget):
                 QtWidgets.QMessageBox.Ok
             )
 
+    def draw_drag_preview(self, painter, rect):
+        """Draw preview of task being dragged"""
+        if not self.drag_preview_time or not self.dragging_task_id:
+            return
+        
+        # Only show preview if the preview time is within the configured range
+        if not self.is_time_in_range(self.drag_preview_time):
+            return
+        
+        task_progress = self.time_to_progress(self.drag_preview_time)
+        
+        # Draw preview line in a different style (dashed, semi-transparent)
+        pen = QtGui.QPen(QtGui.QColor(255, 165, 0, 180), 3)  # Orange, semi-transparent
+        pen.setStyle(QtCore.Qt.DashLine)
+        painter.setPen(pen)
+        
+        if self.bar_position in ["top", "bottom"]:
+            # Draw vertical preview line
+            x = int(rect.width() * task_progress)
+            painter.drawLine(x, 0, x, rect.height())
+            
+            # Draw time text above/below the line
+            time_str = self.drag_preview_time.strftime("%H:%M:%S")
+            painter.setPen(QtGui.QColor(255, 165, 0))  # Orange text
+            font = QtGui.QFont("Arial", 10, QtGui.QFont.Bold)
+            painter.setFont(font)
+            
+            text_rect = painter.fontMetrics().boundingRect(time_str)
+            text_x = max(0, min(x - text_rect.width() // 2, rect.width() - text_rect.width()))
+            
+            if self.bar_position == "top":
+                text_y = rect.height() + text_rect.height() + 2
+            else:  # bottom
+                text_y = -2
+            
+            painter.drawText(text_x, text_y, time_str)
+            
+        else:  # left or right
+            # Draw horizontal preview line
+            y = int(rect.height() * task_progress)
+            painter.drawLine(0, y, rect.width(), y)
+            
+            # Draw time text beside the line
+            time_str = self.drag_preview_time.strftime("%H:%M:%S")
+            painter.setPen(QtGui.QColor(255, 165, 0))  # Orange text
+            font = QtGui.QFont("Arial", 10, QtGui.QFont.Bold)
+            painter.setFont(font)
+            
+            text_rect = painter.fontMetrics().boundingRect(time_str)
+            text_y = max(text_rect.height(), min(y + text_rect.height() // 2, rect.height()))
+            
+            if self.bar_position == "left":
+                text_x = rect.width() + 2
+            else:  # right
+                text_x = -text_rect.width() - 2
+            
+            painter.drawText(text_x, text_y, time_str)
+
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
-
     clock_bar = AnimatedToggleClockBar()
     sys.exit(app.exec())
 

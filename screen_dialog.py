@@ -2,10 +2,11 @@ from PySide6 import QtWidgets, QtCore
 import datetime
 
 class SettingsDialog(QtWidgets.QDialog):
-    def __init__(self, parent=None, screens=None, current_index=0, position='top', start_time=None, end_time=None):
+    def __init__(self, parent=None, screens=None, current_index=0, position='top', start_time=None, end_time=None, 
+                 task_dragging_enabled=True, drag_snap_seconds=10):
         super().__init__(parent)
         self.setWindowTitle("Linear Clock Settings")
-        self.setFixedSize(350, 250)
+        self.setFixedSize(400, 350)
 
         self.selected_index = current_index
         self.selected_position = position
@@ -60,6 +61,30 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(time_group)
 
+        # Task dragging settings
+        drag_group = QtWidgets.QGroupBox("Task Dragging")
+        drag_layout = QtWidgets.QFormLayout(drag_group)
+
+        # Enable task dragging checkbox
+        self.drag_enabled_checkbox = QtWidgets.QCheckBox()
+        self.drag_enabled_checkbox.setChecked(task_dragging_enabled)
+        drag_layout.addRow("Enable task dragging:", self.drag_enabled_checkbox)
+
+        # Snap interval spinbox
+        self.snap_interval_spinbox = QtWidgets.QSpinBox()
+        self.snap_interval_spinbox.setRange(1, 300)  # 1 second to 5 minutes
+        self.snap_interval_spinbox.setValue(drag_snap_seconds)
+        self.snap_interval_spinbox.setSuffix(" seconds")
+        drag_layout.addRow("Snap interval:", self.snap_interval_spinbox)
+
+        # Info label for dragging
+        drag_info_label = QtWidgets.QLabel("Drag tasks to different times. Tasks snap to the configured interval.")
+        drag_info_label.setWordWrap(True)
+        drag_info_label.setStyleSheet("color: gray; font-size: 10px;")
+        drag_layout.addRow(drag_info_label)
+
+        layout.addWidget(drag_group)
+
         # Buttons
         button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)
@@ -74,4 +99,5 @@ class SettingsDialog(QtWidgets.QDialog):
         start_time = datetime.time(qt_start.hour(), qt_start.minute(), qt_start.second())
         end_time = datetime.time(qt_end.hour(), qt_end.minute(), qt_end.second())
         
-        return self.screen_combo.currentIndex(), self.position_combo.currentText(), start_time, end_time
+        return (self.screen_combo.currentIndex(), self.position_combo.currentText(), start_time, end_time,
+                self.drag_enabled_checkbox.isChecked(), self.snap_interval_spinbox.value())
